@@ -1,0 +1,48 @@
+# P0a 手工内存(in-memory graph 的人肉版)— 闭环记账
+# 提取协议:architecture §6.3(人肉扫描轨迹中 edit(X)…run(C)…fail→pass 模式)
+
+claims:
+  - claim_id: clm_0001
+    source_trajectory: seal_11 (Fable subagent, A1/add-field, fixture-v3)
+    note: 唯一一条教科书轨迹:编辑→失败→事后调查→refresh→通过
+    proposition: {after_edit: src/models.py, must_run: python3 tools/refresh.py}
+    polarity: +1
+    task_family: add-field
+    grounding: actions 3..7(edit models → test FAIL → 调查 → refresh → pass)
+  - claim_id: clm_0002
+    source_trajectory: seal_15 (Fable subagent, B1/rename, fixture-v3)
+    proposition: {after_edit: src/models.py, must_run: python3 tools/refresh.py}
+    polarity: +1
+    task_family: rename-field
+    grounding: actions 10..12
+
+# caveat(诚实记录):发现轨迹来自 Fable 密封探针而非 code-kitty——
+# Sonnet 四次 memory-off run(A1/B1/B1r2/A2)全部走手动同步旁路,0/4 发现 refresh.py。
+# P0b 必须解决学习供给问题(见 P0A_LOG 决策备忘)。
+
+memory_items:
+  - memory_id: mem_0001
+    type: ProceduralDependency
+    canonical_key: "ProceduralDependency|src/models.py|python3 tools/refresh.py"
+    trigger: {after_edit: src/models.py}
+    action: {must_run: python3 tools/refresh.py}
+    scope: {repo: orderkit-fixture}
+    status: active_correlational
+    causal_verified: false
+
+belief:
+  mem_0001:
+    support_count: 2
+    contradiction_count: 0
+    distinct_task_family: 2     # {add-field, rename-field}
+    promotion_check:
+      rule: "families>=2 AND S>=2 AND S>=3F AND actionable"   # FR-23 P0 counting rule
+      after_clm_0001_only: "families=1 → 不可晋升 ✓(S5 人肉验证)"
+      after_clm_0002: "families=2, S=2, F=0 → 晋升 active_correlational ✓"
+
+injection_log:   # MEMORY_INJECTED 的人肉版
+  - run: ck_a2_mem
+    memory_id: mem_0001
+    rendered: FR-34 payload(memory_id/status/caution/trigger/instruction/evidence)
+    adopted: true     # 机械判定:编辑 src/models.py 后 run 了 python3 tools/refresh.py
+    outcome: success(24 passed)

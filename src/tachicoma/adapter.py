@@ -17,6 +17,7 @@ from pathlib import Path
 CODE_KITTY_ROOT = Path(os.environ.get("CODE_KITTY_ROOT", Path.home() / "Projects" / "code-kitty"))
 
 _TEST_CMD = re.compile(r"\bpytest\b")
+_CHECK_CMD = re.compile(r"\btools/check_\w+\.py\b")   # CI-equivalent 验证工具(FR-9b)
 _READ_CMD = re.compile(r"\b(cat|head|tail|less|sed -n)\b")
 
 
@@ -71,6 +72,14 @@ def session_to_raw_events(session_path: str | Path, tool_path: str = "tools/refr
                     events.append({"step_idx": step, "event_type": "TEST_RUN",
                                    "payload": {"command": cmd,
                                                "passed": bool(passed and not failed)}})
+                elif _CHECK_CMD.search(cmd):
+                    # FR-9b(R2'-2):check 工具 → 带 passed 字段的 TEST_RUN,
+                    # 否则 VP 提取的 fail→pass 锚无输入。成败按输出标记/退出码线索
+                    ok = bool(re.search(r"\bOK\b|\bPASS(ED)?\b|contract ok", out, re.I)) \
+                        and not re.search(r"\bFAIL(ED)?\b|Error|Traceback|mismatch", out)
+                    events.append({"step_idx": step, "event_type": "TEST_RUN",
+                                   "payload": {"command": cmd, "passed": ok,
+                                               "source": "check_tool"}})
                 elif tool_path in cmd and _READ_CMD.search(cmd):
                     events.append({"step_idx": step, "event_type": "FILE_READ",
                                    "payload": {"path": tool_path, "via": cmd}})

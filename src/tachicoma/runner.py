@@ -44,6 +44,9 @@ def events_to_actions(events: list[dict]) -> list[Action]:
         elif et == "TEST_RUN":
             actions.append(Action(ev["step_idx"], "test_run", command=p.get("command"),
                                   test_passed=p.get("passed")))
+        elif et == "DELAYED_CHECK_RESULT":   # FR-9b:oracle 结果 = 合法 outcome 信号
+            actions.append(Action(ev["step_idx"], "oracle_check",
+                                  test_passed=p.get("passed")))
     return actions
 
 

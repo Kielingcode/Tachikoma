@@ -27,9 +27,12 @@ def retrieve(store, repo: str, workspace: Path, prompt: str, k: int = 3,
     for row in store.active_items(repo):
         trigger = json.loads(row["trigger_json"])
         path = trigger.get("after_edit", "")
-        if not path:
+        # VP trigger 规则(v1.1.1 漏项修复):trigger 非路径({"before":"declare_done"}),
+        # repo scope 内 always-on——"declare done 前"在每个任务里都会到来
+        vp_always_on = row["memory_type"] == "ValidationParity" and not path
+        if not path and not vp_always_on:
             continue
-        if _path_in_workspace(path, workspace) or path in prompt:
+        if vp_always_on or _path_in_workspace(path, workspace) or path in prompt:
             candidates.append({
                 "memory_id": row["memory_id"],
                 "memory_type": row["memory_type"],
@@ -63,8 +66,13 @@ def render_payload(item: dict) -> str:
     """FR-34 memory payload(YAML 形态,逐字段)。"""
     caution = ("observed useful pattern, not yet causally verified"
                if not item["causal_verified"] else "causally verified via paired canary")
-    instruction = (f"after editing {item['trigger'].get('after_edit')}, "
-                   f"run \"{item['action'].get('must_run')}\" before final validation")
+    # 渲染分型(v1.1.1):VP 的 trigger 槽不是路径,套 PD 句式会渲染出 "after editing None"
+    if item["memory_type"] == "ValidationParity":
+        instruction = (f"before declaring the task done, "
+                       f"run \"{item['action'].get('must_run')}\" and make it pass")
+    else:
+        instruction = (f"after editing {item['trigger'].get('after_edit')}, "
+                       f"run \"{item['action'].get('must_run')}\" before final validation")
     return "\n".join([
         "memory_item:",
         f"  memory_id: {item['memory_id']}",

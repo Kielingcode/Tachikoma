@@ -72,6 +72,10 @@ def canonical_key(memory_type: str, trigger: dict, action: dict) -> str:
         t = normalize_path(trigger["after_edit"])
         a = normalize_command(action["must_run"])
         return f"ProceduralDependency|{t}|{a}"
+    if memory_type == "ValidationParity":
+        # FR-9b(v2.6)定稿:trigger 槽固定 declare_done,单 action 槽
+        a = normalize_command(action["must_run"])
+        return f"ValidationParity|declare_done|{a}"
     raise ValueError(f"unknown memory_type: {memory_type!r}")
 
 
@@ -79,4 +83,7 @@ def rival_key(memory_type: str, scope_repo: str, trigger: dict) -> str:
     """Same type+scope+trigger slot, different action slot => rivals (FR-26)."""
     if memory_type == "ProceduralDependency":
         return f"{memory_type}|{scope_repo}|{normalize_path(trigger['after_edit'])}"
+    if memory_type == "ValidationParity":
+        # trigger 槽分组——与 PD 不同组,跨类型天然并存注入(S15)
+        return f"{memory_type}|{scope_repo}|declare_done"
     raise ValueError(f"unknown memory_type: {memory_type!r}")

@@ -54,6 +54,7 @@ class ExtractedClaim:
 
 def extract(ep: Episode) -> list[ExtractedClaim]:
     claims: list[ExtractedClaim] = []
+    claims.extend(_extract_validation_parity(ep))
 
     flip = _first_fail_to_pass(ep.actions)
     if flip is not None:
@@ -74,6 +75,46 @@ def extract(ep: Episode) -> list[ExtractedClaim]:
             ))
 
     return claims
+
+
+def _extract_validation_parity(ep: Episode) -> list[ExtractedClaim]:
+    """FR-9b(v2.6)第二条确定性规则:ValidationParity。
+
+    锚点 = **check 命令自身**的 fail→pass 翻转(同一归一化命令,先 fail 后 pass),
+    且翻转后首个 oracle_check(DELAYED_CHECK_RESULT)通过 → 正向 VP claim。
+    本地 test 套件(pytest)按构造排除——它是"说谎方",不能成为 VP 的 action
+    (FR-14b 归因规则的提取侧镜像)。VP 锚定 check 命令自身翻转 + oracle 确认,
+    与 PD 的 edit→procedure→suite-flip 形状正交,不会互相坍缩。
+    """
+    by_cmd: dict[str, list[Action]] = {}
+    for a in ep.actions:
+        if a.kind == "test_run" and a.command and "pytest" not in a.command:
+            by_cmd.setdefault(normalize_command(a.command), []).append(a)
+
+    out: list[ExtractedClaim] = []
+    for cmd, runs in by_cmd.items():
+        flip_step, seen_fail = None, None
+        for a in runs:
+            if a.test_passed is False and seen_fail is None:
+                seen_fail = a.step
+            elif a.test_passed and seen_fail is not None:
+                flip_step = a.step
+                break
+        if flip_step is None:
+            continue
+        oracle_after = next((a for a in ep.actions
+                             if a.kind == "oracle_check" and a.step > flip_step), None)
+        if oracle_after is None or not oracle_after.test_passed:
+            continue
+        out.append(ExtractedClaim(
+            claim_type="ValidationParity",
+            trigger={"before": "declare_done"},
+            action={"must_run": cmd},
+            polarity=+1,
+            grounding_start_step=seen_fail,
+            grounding_end_step=oracle_after.step,
+        ))
+    return out
 
 
 def _is_source_edit(a: Action) -> bool:

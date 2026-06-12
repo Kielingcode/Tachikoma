@@ -20,7 +20,7 @@ from tachicoma.extractor import EXTRACTOR_VERSION, extract
 from tachicoma.governance import (evaluate_demotion, evaluate_gate, evaluate_inert,
                                   recompute_belief)
 from tachicoma.path_classifier import Action, Episode, adoption_record, classify
-from tachicoma.resolver import canonical_key, rival_key
+from tachicoma.resolver import canonical_key, normalize_command, rival_key
 from tachicoma.worlds import world_for
 
 # learning-excluded arms(终审修订:store 级强制,runner 纪律只是第一道):
@@ -175,6 +175,9 @@ class MemoryStore:
                 actions.append(Action(r["step_idx"], "test_run",
                                       command=p.get("command"),
                                       test_passed=p.get("passed")))
+            elif et == "DELAYED_CHECK_RESULT":   # FR-9b:oracle 结果 = 合法 outcome 信号
+                actions.append(Action(r["step_idx"], "oracle_check",
+                                      test_passed=p.get("passed")))
             elif et == "MEMORY_INJECTED":
                 injected.extend(p.get("memory_ids", []))
         w = world_for(meta["generator_template"])   # Stage 3.2:路径按世界参数化
@@ -241,30 +244,67 @@ class MemoryStore:
             # 负向触发 = adopted ∧ post_adoption_first_test_passed is False
             # ——"采纳后局部未修复";episode 最终恢复不再吞掉 stale harm 证据。
             adopted_keys: set[str] = set()
+            g1_handled_keys: set[str] = set()   # G1/oracle 归因已落账的 key,组织循环去重
+            oracle_checks = [a for a in ep.actions if a.kind == "oracle_check"]
             for mid in injected:
                 row = cur.execute(
                     "SELECT * FROM memory_items WHERE memory_id=?", (mid,)).fetchone()
                 if not row:
                     continue
+                trigger = json.loads(row["trigger_json"])
+                action = json.loads(row["action_json"])
+                if row["memory_type"] == "ValidationParity":
+                    # FR-9b case ④/⑤:VP 采纳 = check cmd 实际被运行;
+                    # 锚定 = 采纳步后首个 oracle_check
+                    cmd = normalize_command(action.get("must_run", ""))
+                    vp_run = next((a for a in ep.actions
+                                   if a.kind in ("run", "test_run") and a.command
+                                   and normalize_command(a.command) == cmd), None)
+                    if vp_run is None:
+                        continue   # case ② 注入未采纳:不归因
+                    adopted_keys.add(row["canonical_key"])
+                    o = next((a for a in oracle_checks if a.step > vp_run.step), None)
+                    if o is not None:
+                        self._insert_claim_and_link(
+                            cur, episode_id, trigger, action,
+                            +1 if o.test_passed else -1,
+                            vp_run.step, o.step, "adoption_outcome",
+                            claim_type="ValidationParity")
+                        g1_handled_keys.add(row["canonical_key"])
+                        affected.add(mid)
+                    continue
                 rec = adoption_record(
-                    ep, json.loads(row["trigger_json"]).get("after_edit", ep.trigger_path),
-                    json.loads(row["action_json"]).get("must_run", ""))
+                    ep, trigger.get("after_edit", ep.trigger_path),
+                    action.get("must_run", ""))
                 if rec.adopted:
                     adopted_keys.add(row["canonical_key"])
                     if rec.post_adoption_first_test_passed is False:
+                        # G1(P1):采纳后首个本地测试失败 → 程序级负向
                         self._insert_claim_and_link(
-                            cur, episode_id, json.loads(row["trigger_json"]),
-                            json.loads(row["action_json"]), -1,
+                            cur, episode_id, trigger, action, -1,
                             rec.adoption_step or 0, rec.adoption_step or 0,
                             "adoption_outcome")
                         affected.add(mid)
+                    elif rec.post_adoption_first_test_passed:
+                        # FR-9b case ③(oracle 孪生):本地过、oracle 不过 = false
+                        # success after adoption → 程序级负向(P9 负向全计)
+                        o = next((a for a in oracle_checks
+                                  if a.step > (rec.adoption_step or 0)), None)
+                        if o is not None and o.test_passed is False:
+                            self._insert_claim_and_link(
+                                cur, episode_id, trigger, action, -1,
+                                rec.adoption_step or 0, o.step, "adoption_outcome")
+                            affected.add(mid)
 
             for c in claims:
-                ckey = canonical_key("ProceduralDependency", c.trigger, c.action)
+                ckey = canonical_key(c.claim_type, c.trigger, c.action)
+                if ckey in g1_handled_keys:
+                    continue   # 该 key 本 episode 已由 oracle 归因落账,防双计
                 src = "adoption_outcome" if ckey in adopted_keys else "organic_task"
                 mid = self._insert_claim_and_link(
                     cur, episode_id, c.trigger, c.action, c.polarity,
-                    c.grounding_start_step, c.grounding_end_step, src)
+                    c.grounding_start_step, c.grounding_end_step, src,
+                    claim_type=c.claim_type)
                 affected.add(mid)
 
             # 5-6. recompute beliefs + gate evaluation (cascade)
@@ -314,8 +354,9 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _insert_claim_and_link(self, cur, episode_id, trigger, action, polarity,
-                               g0, g1, source) -> str:
-        ckey = canonical_key("ProceduralDependency", trigger, action)
+                               g0, g1, source,
+                               claim_type: str = "ProceduralDependency") -> str:
+        ckey = canonical_key(claim_type, trigger, action)
         row = cur.execute(
             "SELECT memory_id FROM memory_items WHERE canonical_key=?", (ckey,)).fetchone()
         if row:
@@ -329,15 +370,15 @@ class MemoryStore:
                 "INSERT INTO memory_items (memory_id, memory_type, canonical_key,"
                 " trigger_json, action_json, rival_key, scope_json, status,"
                 " causal_verified, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?)",
-                (mid, "ProceduralDependency", ckey, json.dumps(trigger),
-                 json.dumps(action), rival_key("ProceduralDependency", repo, trigger),
+                (mid, claim_type, ckey, json.dumps(trigger),
+                 json.dumps(action), rival_key(claim_type, repo, trigger),
                  json.dumps({"repo": repo}), "candidate", _now(), _now()))
         cid = f"clm_{uuid.uuid4().hex[:8]}"
         cur.execute(
             "INSERT INTO claims (claim_id, episode_id, claim_type, canonical_key,"
             " proposition_json, polarity, grounding_start_step, grounding_end_step,"
             " extractor_version, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (cid, episode_id, "ProceduralDependency", ckey,
+            (cid, episode_id, claim_type, ckey,
              json.dumps({"trigger": trigger, "action": action}), polarity,
              g0, g1, EXTRACTOR_VERSION, _now()))
         cur.execute(

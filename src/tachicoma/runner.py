@@ -16,6 +16,7 @@ from tachicoma.adapter import CodeKittyAdapter
 from tachicoma.generator import materialize
 from tachicoma.path_classifier import Action, Episode, classify
 from tachicoma.retrieval import injection_block, retrieve
+from tachicoma.worlds import world_for
 
 
 def _now() -> str:
@@ -87,9 +88,12 @@ def run_episode(store, variant_id: str, *, arm: str, model: str, memory_on: bool
                           "payload": {"memory_ids": [i["memory_id"] for i in injected],
                                       "rival_suppressed": suppressed}})  # NFR-8 审计
 
+    wp = world_for(bundle.generator_template)   # P1 Stage 3.2:路径参数随世界走
     ep = Episode(actions=events_to_actions(events), eventual_success=eventual,
                  cost_steps=res.cost_steps, cost_tokens=res.cost_tokens,
-                 memory_injected=bool(injected))
+                 memory_injected=bool(injected),
+                 trigger_path=wp.trigger_path, tool_path=wp.tool_path,
+                 derived_paths=wp.derived_paths, golden_paths=wp.golden_paths)
     pc = classify(ep)
 
     store.ingest_episode({

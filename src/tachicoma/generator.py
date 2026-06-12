@@ -140,6 +140,31 @@ _SPECS = [
     _add_field_variant("H2", "Shipment", "eta_days", "int", "0", "3", held_out=True),
     _rename_variant("H3", "Order", "order_id", "order_ref", held_out=True),
     _change_type_variant("H4"),
+    # P1 新参数域(与 learning / held-out 均不相交;services 仅依赖
+    # Order.amount_cents,其余字段 rename 安全)
+    # — canary 配对补充(v4;与 H1/H2/H3 凑 6 对,3 add + 3 rename)
+    _add_field_variant("C1", "Order", "region", "string", '"US"', '"EU"', held_out=True),
+    _rename_variant("C2", "Invoice", "total_cents", "grand_total_cents", held_out=True),
+    _rename_variant("C3", "Shipment", "carrier", "carrier_name", held_out=True),
+    # — canary 条件轮备用(4–5/6 时补 3 对:C4/C5 + H4)
+    _add_field_variant("C4", "Shipment", "notes", "string", '""', '"fragile"', held_out=True),
+    _add_field_variant("C5", "Invoice", "issued_on", "string", '""', '"2026-01-01"',
+                       held_out=True),
+    # — near-miss 配对(shim_v1 用,FR-7d;NM3/NM4 为扩容备用)
+    _add_field_variant("NM1", "Customer", "nickname", "string", '""', '"ace"', held_out=True),
+    _rename_variant("NM2", "Invoice", "order_id", "order_no", held_out=True),
+    _add_field_variant("NM3", "Customer", "birthday", "string", '""', '"2000-01-01"',
+                       held_out=True),
+    _rename_variant("NM4", "Shipment", "carrier", "carrier_code", held_out=True),
+    # — rotation(rot_v2a / rot_v2b 用,Stage 3a/3b)
+    _add_field_variant("R1", "Customer", "segment", "string", '"smb"', '"ent"', held_out=True),
+    _add_field_variant("R2", "Invoice", "po_number", "string", '""', '"PO-9"', held_out=True),
+    _rename_variant("R3", "Customer", "name", "full_name", held_out=True),
+    _add_field_variant("R4", "Shipment", "weight_kg", "int", "0", "3", held_out=True),
+    # — wasteful(shim_v1 用,Stage 3c,learn=True)
+    _add_field_variant("W1", "Order", "channel", "string", '"web"', '"app"', held_out=True),
+    _add_field_variant("W2", "Customer", "locale", "string", '"en"', '"fr"', held_out=True),
+    _add_field_variant("W3", "Invoice", "memo", "string", '""', '"q3"', held_out=True),
 ]
 VARIANTS = {s["variant_id"]: s for s in _SPECS}
 LEARNING_VARIANTS = [s["variant_id"] for s in _SPECS if not s["held_out"]]
@@ -148,24 +173,37 @@ HELDOUT_VARIANTS = [s["variant_id"] for s in _SPECS if s["held_out"]]
 _IGNORE = shutil.ignore_patterns("__pycache__", ".git", ".pytest_cache", "*.pyc")
 
 
-def materialize(variant_id: str, dest: Path,
-                template_dir: Path = TEMPLATE_DIR) -> TaskBundle:
-    spec = VARIANTS[variant_id]
+def materialize(variant_ref: str, dest: Path,
+                template_dir: Path | None = None) -> TaskBundle:
+    """variant_ref 支持世界限定:'A1' = v4 缺省;'R1@rot_v2a' = 同一表面任务
+    物化到 rot_v2a 模板(P1 Stage 3.2)。generator_template / fact_oracle 随世界走;
+    未知世界键显式 KeyError(禁止静默回落 v4)。"""
+    vid, _, world_key = variant_ref.partition("@")
+    spec = VARIANTS[vid]
+    if world_key:
+        from tachicoma.worlds import WORLDS
+        world = WORLDS[world_key]
+        tdir = template_dir or world.template_dir
+        template_id, oracle = world.template_id, dict(world.fact_oracle)
+    else:
+        tdir = template_dir or TEMPLATE_DIR
+        template_id, oracle = TEMPLATE_ID, dict(FACT_ORACLE)
     dest = Path(dest)
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(template_dir, dest, ignore=_IGNORE)
+    shutil.copytree(tdir, dest, ignore=_IGNORE)
     for rel, content in spec["overlays"].items():
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     return TaskBundle(
-        task_id=f"{variant_id}_{uuid.uuid4().hex[:6]}",
-        variant_id=variant_id,
+        task_id=f"{vid}_{uuid.uuid4().hex[:6]}",
+        variant_id=variant_ref,
         family_id=spec["family_id"],
-        generator_template=TEMPLATE_ID,
+        generator_template=template_id,
         repo=REPO_NAME,
         workspace=dest,
         prompt=spec["prompt"],
         test_command=TEST_COMMAND,
+        fact_oracle=oracle,
     )

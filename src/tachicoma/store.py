@@ -18,9 +18,10 @@ from pathlib import Path
 
 from tachicoma.extractor import EXTRACTOR_VERSION, extract
 from tachicoma.governance import (evaluate_demotion, evaluate_gate, evaluate_inert,
-                                  recompute_belief)
+                                  evaluate_rebirth, recompute_belief)
 from tachicoma.path_classifier import Action, Episode, adoption_record, classify
-from tachicoma.resolver import canonical_key, normalize_command, rival_key
+from tachicoma.resolver import (canonical_key, check_segments, normalize_command,
+                                rival_key)
 from tachicoma.worlds import world_for
 
 # learning-excluded arms(终审修订:store 级强制,runner 纪律只是第一道):
@@ -259,7 +260,7 @@ class MemoryStore:
                     cmd = normalize_command(action.get("must_run", ""))
                     vp_run = next((a for a in ep.actions
                                    if a.kind in ("run", "test_run") and a.command
-                                   and normalize_command(a.command) == cmd), None)
+                                   and cmd in check_segments(a.command)), None)
                     if vp_run is None:
                         continue   # case ② 注入未采纳:不归因
                     adopted_keys.add(row["canonical_key"])
@@ -398,7 +399,8 @@ class MemoryStore:
             # tie-break:同 episode 内负向在前(保守:正向在窗口存活最久);
             # 重放会换 claim rowid,故排序键只用不可变锚。
             evidence = cur.execute(
-                "SELECT e.polarity, ep.started_at FROM evidence_links e"
+                "SELECT e.polarity, e.evidence_source, ep.started_at, ep.family_id"
+                " FROM evidence_links e"
                 " JOIN claims c ON e.claim_id=c.claim_id"
                 " JOIN episodes ep ON c.episode_id=ep.episode_id"
                 " WHERE e.memory_id=? ORDER BY ep.started_at, e.polarity",
@@ -417,16 +419,28 @@ class MemoryStore:
                     f" AND {excl}",
                     (repo_row["r"], evidence[-1]["started_at"])).fetchone()["c"]
             new = evaluate_demotion(old, [dict(r) for r in evidence], episodes_since)
+            if new == old and old in ("deprecated", "disputed"):
+                # 重生车道(FR-22b):死态 memory 收到新证据时评估 post-death 重生
+                new = evaluate_rebirth(old, [dict(r) for r in evidence])
         if new != old:
-            cur.execute(
-                "UPDATE memory_items SET status=?, updated_at=? WHERE memory_id=?",
-                (new, _now(), memory_id))
+            reborn = old in ("deprecated", "disputed") and new in (
+                "candidate", "active_correlational")
+            if reborn:
+                # 绝不直回 verified:复活即清 causal_verified,必须重过 canary
+                cur.execute(
+                    "UPDATE memory_items SET status=?, causal_verified=0, updated_at=?"
+                    " WHERE memory_id=?", (new, _now(), memory_id))
+            else:
+                cur.execute(
+                    "UPDATE memory_items SET status=?, updated_at=? WHERE memory_id=?",
+                    (new, _now(), memory_id))
             cur.execute(
                 "INSERT INTO status_history (memory_id, old_status, new_status, reason,"
                 " evidence_snapshot_json, job_id, created_at) VALUES (?,?,?,?,?,?,?)",
                 (memory_id, old, new,
-                 f"gate: S={belief['support']} F={belief['contra']}"
-                 f" families={belief['families']}",
+                 ("rebirth: post-death organic evidence (FR-22b)" if reborn else
+                  f"gate: S={belief['support']} F={belief['contra']}"
+                  f" families={belief['families']}"),
                  json.dumps(belief), job_id, _now()))
 
     def _apply_inert(self, cur, job_id, memory_id) -> None:

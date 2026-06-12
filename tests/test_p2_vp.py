@@ -179,3 +179,93 @@ def test_oracle_attribution_cases_3_4_5():
         "SELECT per_context_json FROM belief_states WHERE memory_id=?",
         (vp_mid,)).fetchone()["per_context_json"])
     assert belief["adoption_support"] >= 1
+
+
+# ------------------------------------------ FR-22b 重生车道 ----
+
+def _g1_neg_events(mid):
+    return [
+        {"step_idx": 0, "event_type": "MEMORY_INJECTED", "payload": {"memory_ids": [mid]}},
+        {"step_idx": 1, "event_type": "TEST_RUN",
+         "payload": {"command": PYTEST, "passed": False, "source": "harness_pristine_check"}},
+        {"step_idx": 2, "event_type": "FILE_EDIT", "payload": {"path": "src/models.py"}},
+        {"step_idx": 3, "event_type": "COMMAND_RUN",
+         "payload": {"command": "python3 tools/refresh.py"}},
+        {"step_idx": 4, "event_type": "TEST_RUN", "payload": {"command": PYTEST, "passed": False}},
+    ]
+
+
+def _pd_pos_events():
+    return [
+        {"step_idx": 1, "event_type": "TEST_RUN", "payload": {"command": PYTEST, "passed": False}},
+        {"step_idx": 2, "event_type": "FILE_EDIT", "payload": {"path": "src/models.py"}},
+        {"step_idx": 3, "event_type": "COMMAND_RUN",
+         "payload": {"command": "python3 tools/refresh.py"}},
+        {"step_idx": 4, "event_type": "TEST_RUN", "payload": {"command": PYTEST, "passed": True}},
+    ]
+
+
+def _dead_refresh_store():
+    """出生→晋升→2 负向 disputed→3 episodes 流逝→deprecated 的 refresh memory。"""
+    s = MemoryStore()
+    for i, fam in enumerate(("add-field", "rename-field")):
+        s.ingest_episode(_meta(f"b{i}", fam, started=f"t{i}"), _pd_pos_events())
+        s.relearn(f"b{i}")
+    mid = s.con.execute("SELECT memory_id FROM memory_items WHERE canonical_key"
+                        " LIKE '%refresh%'").fetchone()["memory_id"]
+    for i, t in enumerate(("t3", "t4")):
+        s.ingest_episode(_meta(f"n{i}", "add-field", arm="memory_on", started=t),
+                         _g1_neg_events(mid))
+        s.relearn(f"n{i}")
+    # 3 个无关 episodes 流逝(migrate 路线)推进观察期 → deprecated
+    def mig():
+        ev = _pd_pos_events()
+        ev[2] = {"step_idx": 3, "event_type": "COMMAND_RUN",
+                 "payload": {"command": "python3 tools/migrate.py"}}
+        return ev
+    for i, t in enumerate(("t5", "t6", "t7")):
+        s.ingest_episode(_meta(f"m{i}", "add-field", arm="memory_on", started=t), mig())
+        s.relearn(f"m{i}")
+    assert s.con.execute("SELECT status FROM memory_items WHERE memory_id=?",
+                         (mid,)).fetchone()["status"] == "deprecated"
+    return s, mid
+
+
+def test_rebirth_from_post_death_organic_evidence():
+    """S14 机制:死亡点(最后负向)之后 organic fam≥2∧s≥2 → candidate 重生,
+    causal_verified 清零(必须重过 canary);重放幂等。"""
+    s, mid = _dead_refresh_store()
+    s.con.execute("UPDATE memory_items SET causal_verified=1 WHERE memory_id=?", (mid,))
+    s.con.commit()
+    # post-death organic 重发现 ×2 families(世界修好了,refresh 又有用)
+    for i, fam in enumerate(("add-field", "rename-field")):
+        s.ingest_episode(_meta(f"r{i}", fam, started=f"t{8+i}"), _pd_pos_events())
+        s.relearn(f"r{i}")
+    row = s.con.execute("SELECT status, causal_verified FROM memory_items"
+                        " WHERE memory_id=?", (mid,)).fetchone()
+    assert row["status"] in ("candidate", "active_correlational")  # 重生(且可再过 gate)
+    assert row["causal_verified"] == 0                              # 不直回 verified
+    hist = [(r["old_status"], r["new_status"]) for r in s.con.execute(
+        "SELECT old_status, new_status FROM status_history WHERE memory_id=?"
+        " ORDER BY id", (mid,))]
+    assert ("deprecated", "candidate") in hist
+    # 重放零漂移
+    before = {r["memory_id"]: r["status"] for r in
+              s.con.execute("SELECT memory_id, status FROM memory_items")}
+    for r in s.con.execute("SELECT episode_id FROM episodes ORDER BY started_at").fetchall():
+        s.relearn(r["episode_id"])
+    after = {r["memory_id"]: r["status"] for r in
+             s.con.execute("SELECT memory_id, status FROM memory_items")}
+    assert before == after
+
+
+def test_pre_death_evidence_does_not_revive():
+    """A-2 断言的单测形态:死亡点之前的正向(出生期证据)不触发复活;
+    单条 post-death 正向(fam=1)也不够。"""
+    s, mid = _dead_refresh_store()
+    assert s.con.execute("SELECT status FROM memory_items WHERE memory_id=?",
+                         (mid,)).fetchone()["status"] == "deprecated"
+    s.ingest_episode(_meta("r0", "add-field", started="t8"), _pd_pos_events())
+    s.relearn("r0")   # 仅 1 条 post-death organic → fam=1 < 2
+    assert s.con.execute("SELECT status FROM memory_items WHERE memory_id=?",
+                         (mid,)).fetchone()["status"] == "deprecated"

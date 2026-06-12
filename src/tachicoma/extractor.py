@@ -15,9 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tachicoma.path_classifier import Action, Episode
-from tachicoma.resolver import NORMALIZER_VERSION, normalize_command, normalize_path
+from tachicoma.resolver import (NORMALIZER_VERSION, check_segments, classify_segment,
+                                normalize_command, normalize_path, split_segments)
 
-EXTRACTOR_VERSION = f"pd-v2+{NORMALIZER_VERSION}"
+EXTRACTOR_VERSION = f"pd-v3-vp-v1+{NORMALIZER_VERSION}"   # FR-14b/FR-9b(P2)
 
 # Commands that are never load-bearing procedures (validation/inspection noise).
 # Matched on the segment's FIRST TOKEN (basename) — substring matching is a trap
@@ -88,8 +89,10 @@ def _extract_validation_parity(ep: Episode) -> list[ExtractedClaim]:
     """
     by_cmd: dict[str, list[Action]] = {}
     for a in ep.actions:
-        if a.kind == "test_run" and a.command and "pytest" not in a.command:
-            by_cmd.setdefault(normalize_command(a.command), []).append(a)
+        if a.kind == "test_run" and a.command:
+            # FR-14b:复合命令按段归因——VP 取排除本地套件后的 validation 段
+            for seg in check_segments(a.command):
+                by_cmd.setdefault(seg, []).append(a)
 
     out: list[ExtractedClaim] = []
     for cmd, runs in by_cmd.items():
@@ -134,24 +137,15 @@ def _first_fail_to_pass(actions: list[Action]) -> Action | None:
 
 
 def _last_procedure_between(actions: list[Action], start: int, end: int) -> Action | None:
+    """PD 归因(FR-14b):最后一个 **mutation** 段——validation 段(pytest/check)
+    不抢归因(堵 `migrate.py && pytest` 把 action 抢到 pytest 的坑)。"""
     candidate = None
     for a in actions:
         if start < a.step <= end and a.command:
-            for segment in _segments(a.command):
-                if segment.strip() and not _is_noise(segment):
+            for segment in split_segments(a.command):
+                if classify_segment(segment) == "mutation" and not _is_noise(segment):
                     candidate = Action(a.step, "run", command=segment.strip())
     return candidate
-
-
-def _segments(cmd: str) -> list[str]:
-    """Split compound shell commands (cd X && python3 tools/refresh.py && pytest)."""
-    out = []
-    for part in cmd.split("&&"):
-        part = part.strip()
-        if part.startswith("cd "):
-            continue
-        out.append(part)
-    return out
 
 
 def _strip_command(cmd: str) -> str:

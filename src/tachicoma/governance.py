@@ -101,6 +101,33 @@ DEPRECATE_WINDOW_M = 3         # 观察期:最近 M 条证据(按 episodes.start
 INERT_INJECTIONS_K = 3         # 惰性剪枝:最近 K 次注入连续未被采纳 → deprecated(FR-25/S13)
 
 
+def evaluate_rebirth(current_status: str, evidence_chrono: list[dict]) -> str:
+    """FR-22b 重生车道(P2)——**只看死亡点之后证据**的纯函数。
+
+    死亡点锚 = 最后一条负向证据(负向驱动的死亡;evaluate_demotion 的触发
+    必然以负向为前提,故"最后负向之后无负向且达出生门"等价于
+    "post-death 窗口干净")。inert 死亡(零负向)的精确锚点随 S14 live 定,
+    P2-core 不依赖。门槛与出生门对称:post-death organic fam≥2 ∧ s≥2
+    (隐含无负向——有新负向则它成为新锚)。
+    deprecated → candidate;disputed → active_correlational;
+    **绝不直回 verified**(causal_verified 由调用方清零,必须重过 canary)。
+    """
+    if current_status not in ("deprecated", "disputed"):
+        return current_status
+    last_neg = max((i for i, e in enumerate(evidence_chrono) if e["polarity"] < 0),
+                   default=None)
+    if last_neg is None:
+        return current_status
+    post = evidence_chrono[last_neg + 1:]
+    organic = [e for e in post
+               if e["polarity"] > 0 and e.get("evidence_source") == "organic_task"]
+    s = len(organic)
+    fams = {e.get("family_id") for e in organic if e.get("family_id")}
+    if s >= 2 and len(fams) >= 2:
+        return "candidate" if current_status == "deprecated" else "active_correlational"
+    return current_status
+
+
 def evaluate_inert(current_status: str, injection_adopted_seq: list[bool]) -> str:
     """FR-25 惰性剪枝(纯函数,不依赖 canary):active memory 最近 K 次注入
     **连续未被采纳** → deprecated(inert,直接弧 active → deprecated)。

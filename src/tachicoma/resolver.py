@@ -15,7 +15,50 @@ from __future__ import annotations
 
 import re
 
-NORMALIZER_VERSION = "norm-v2"
+NORMALIZER_VERSION = "norm-v3"   # v3(FR-14b):复合命令拆段 + 段分类(fact-type 归因)
+
+# ---- FR-14b:复合命令拆段与分类(P2)----
+# 顶层拆 && / ; / ||;不做完整 shell parser(覆盖 coding-agent 常见形态)。
+_SEG_SPLIT = re.compile(r"\s*(?:&&|\|\||;)\s*")
+_NOISE_FIRST_TOKENS = {"ls", "cat", "head", "tail", "grep", "find", "diff", "git",
+                       "echo", "pwd", "wc", "sed", "awk", "tree", "which", "cd"}
+_VALIDATION_PAT = re.compile(r"\bpytest\b|tools/check_\w+\.py")
+
+
+def split_segments(cmd: str) -> list[str]:
+    """顶层拆复合命令;丢空段与 cd 段。"""
+    out = []
+    for seg in _SEG_SPLIT.split(cmd.strip()):
+        seg = seg.strip()
+        if not seg or seg.startswith("cd "):
+            continue
+        out.append(seg)
+    return out
+
+
+def classify_segment(seg: str) -> str:
+    """'mutation' | 'validation' | 'noise'(FR-14b 归因前置)。
+
+    分类先于噪声滤:pytest/check 工具是 validation(不是噪声也不是 mutation);
+    PD 归因只取 mutation 段,VP 归因只取排除本地套件后的 validation 段。
+    """
+    tokens = seg.split()
+    if not tokens:
+        return "noise"
+    if _VALIDATION_PAT.search(seg):
+        return "validation"
+    first = tokens[0].rsplit("/", 1)[-1]
+    if first in _NOISE_FIRST_TOKENS:
+        return "noise"
+    if first.startswith("python") and len(tokens) > 1 and tokens[1] == "-c":
+        return "noise"
+    return "mutation"
+
+
+def check_segments(cmd: str) -> list[str]:
+    """VP 归因:validation 段中排除本地 test 套件(pytest)——FR-14b 排歧。"""
+    return [normalize_command(s) for s in split_segments(cmd)
+            if classify_segment(s) == "validation" and "pytest" not in s]
 
 _WS = re.compile(r"\s+")
 _PY = re.compile(r"\bpython(?:3(?:\.\d+)?)?\b")

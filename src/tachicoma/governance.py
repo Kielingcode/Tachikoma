@@ -23,7 +23,8 @@ def recompute_belief(cur, memory_id: str) -> dict:
     import json as _json
 
     rows = cur.execute(
-        "SELECT e.polarity, e.evidence_source, ep.family_id FROM evidence_links e"
+        "SELECT e.polarity, e.evidence_source, ep.family_id, ep.model_version"
+        " FROM evidence_links e"
         " JOIN claims c ON e.claim_id=c.claim_id"
         " JOIN episodes ep ON c.episode_id=ep.episode_id"
         " WHERE e.memory_id=?", (memory_id,)).fetchall()
@@ -35,6 +36,16 @@ def recompute_belief(cur, memory_id: str) -> dict:
     families = len({r["family_id"] for r in rows
                     if r["polarity"] > 0 and r["evidence_source"] == "organic_task"
                     and r["family_id"]})
+    # G-5(P1):model_version 只进 per_context 元数据(per-model diagnostic view 数据源)。
+    # belief 仍按 repo/fact 聚合;retrieval 不读 per_context_json——跨模型证据共享
+    # (P0b 实证)不被分桶切碎;分桶/加权/routing 是 P2 决定。
+    by_model: dict[str, dict] = {}
+    for r in rows:
+        m = by_model.setdefault(r["model_version"] or "unknown", {"s": 0, "f": 0})
+        if r["polarity"] > 0:
+            m["s"] += 1
+        else:
+            m["f"] += 1
     belief = {"support": support, "contra": contra, "families": families,
               "adoption_support": adoption}
     cur.execute(
@@ -49,8 +60,23 @@ def recompute_belief(cur, memory_id: str) -> dict:
         " computed_from_version=excluded.computed_from_version,"
         " last_seen=datetime('now')",
         (memory_id, support, contra, families,
-         _json.dumps({"adoption_support": adoption}), "gate-v2"))
+         _json.dumps({"adoption_support": adoption, "by_model": by_model}), "gate-v2"))
     return belief
+
+
+def per_model_view(con) -> list[dict]:
+    """Per-model diagnostic view(G-5,只读诊断;不参与 gate / retrieval)。"""
+    import json as _json
+
+    out = []
+    for r in con.execute(
+            "SELECT m.memory_id, m.canonical_key, m.status, b.per_context_json"
+            " FROM memory_items m JOIN belief_states b ON m.memory_id=b.memory_id"):
+        ctx = _json.loads(r["per_context_json"] or "{}")
+        for model, sf in ctx.get("by_model", {}).items():
+            out.append({"memory_id": r["memory_id"], "canonical_key": r["canonical_key"],
+                        "status": r["status"], "model_version": model, **sf})
+    return out
 
 
 def evaluate_gate(current_status: str, belief: dict) -> str:

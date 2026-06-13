@@ -15,6 +15,7 @@ from pathlib import Path
 from tachicoma.adapter import CodeKittyAdapter
 from tachicoma.generator import materialize
 from tachicoma.path_classifier import Action, Episode, classify
+from tachicoma.feedback import build_feedback
 from tachicoma.retrieval import injection_block, retrieve
 from tachicoma.worlds import world_for
 

@@ -85,3 +85,20 @@ def write_fixture_version(dest, key: str, rev: str) -> str:
     (d / "fixture_version.txt").write_text(
         f"key={key}\nrev={rev}\ncontent_sha256={digest}\n", encoding="utf-8")
     return digest
+
+
+def reconstruct_shown_feedback(store, episode_id: str) -> dict | None:
+    """P16 replay-faithful:**仅从 raw_events** 复原该 episode 当时展示的反馈文案
+    (不重算 build_feedback——证明 store 自包含,而非依赖外部状态/可变字段)。"""
+    import json
+    r = store.con.execute(
+        "SELECT payload_json FROM raw_events WHERE episode_id=?"
+        " AND event_type='DELAYED_FEEDBACK_SHOWN' ORDER BY step_idx LIMIT 1",
+        (episode_id,)).fetchone()
+    if not r:
+        return None
+    p = json.loads(r["payload_json"])
+    # 完整性自检:落账文案与其 hash 一致(防落账被篡改/截断)
+    assert p["feedback_text_hash"] == _text_hash(p["text"]), \
+        f"feedback raw_event tampered: hash mismatch in {episode_id}"
+    return p

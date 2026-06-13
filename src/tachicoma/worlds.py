@@ -56,6 +56,14 @@ WORLDS: dict[str, WorldParams] = {
         fact_oracle={"after_edit": "src/models.py", "must_run": "python3 tools/migrate.py",
                      "vp_must_run": "python3 tools/check_contract.py"},
         oracle_script=_SPIKES / "p2" / "worlds" / "genb_oracle.py"),
+    # P2.2:genb_v1 派生,migrate 去排序副作用(逼"先错"→ VP organic 出生上车点)
+    "genb_hs": WorldParams(
+        template_id="genb_hs",
+        template_dir=_SPIKES / "p2_2" / "worlds" / "genb_hs",
+        tool_path="tools/migrate.py",
+        fact_oracle={"after_edit": "src/models.py", "must_run": "python3 tools/migrate.py",
+                     "vp_must_run": "python3 tools/check_contract.py"},
+        oracle_script=_SPIKES / "p2_2" / "worlds" / "genb_hs_oracle.py"),
 }
 
 DEFAULT_WORLD = WORLDS["hidden_coupling_v4"]

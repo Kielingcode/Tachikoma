@@ -90,7 +90,7 @@ import sys
 import zlib
 from pathlib import Path
 
-ROOT = Path({root_expr})
+ROOT = {root_stmt}
 sys.path.insert(0, str(ROOT))
 
 import src.models as _models                                    # noqa: E402
@@ -204,11 +204,11 @@ def build() -> None:
     (DEST / "tools" / "migrate.py").write_text(
         MIGRATE_V21.format(INTEGRITY=INTEGRITY_V21), encoding="utf-8")
     (DEST / "tools" / "check_contract.py").write_text(
-        CHECK_CORE.format(root_expr="__file__).resolve().parent.parent"), encoding="utf-8")
+        CHECK_CORE.format(root_stmt="Path(__file__).resolve().parent.parent"), encoding="utf-8")
     (DEST / "tools" / "update_golden.py").write_text(UPDATE_GOLDEN, encoding="utf-8")
     (DEST / "tools" / "format_samples.py").write_text(FORMAT_SAMPLES, encoding="utf-8")
     # oracle(harness 侧):同构 checker,workspace 路径由 argv 传入
-    ORACLE.write_text(CHECK_CORE.format(root_expr="sys.argv[1]"), encoding="utf-8")
+    ORACLE.write_text(CHECK_CORE.format(root_stmt="Path(sys.argv[1])"), encoding="utf-8")
     # v2.1 重生成 build/cache + golden(用世界自己的 migrate)
     r = _run(DEST, "python3", "tools/migrate.py")
     assert r.returncode == 0, r.stderr

@@ -216,3 +216,50 @@ def test_fr8b_feedback_delivered_to_adapter_and_landed():
     p = _json.loads(fbev["payload_json"])
     assert p["feedback_source_episode_id"] == "seed"
     assert p["feedback_family_scope"] == "rename"
+
+
+def test_fr8b_replay_faithful_reconstruct_from_raw_events():
+    """P2.2 Stage A:relearn/replay 仅从 raw_events 复原 agent 当时所见反馈——
+    证 store 自包含(P2.1 的 bug 正是 prompt 进了却不在 source of truth)。"""
+    import tempfile
+    from pathlib import Path
+    from tachicoma import runner as R
+    from tachicoma.feedback import FEEDBACK_TEXT, reconstruct_shown_feedback
+    from tachicoma.generator import TaskBundle
+    from tachicoma.adapter import EpisodeResult
+
+    seen = {}
+
+    class _Spy:
+        def run(self, task, workspace, model, injection_block="", **kw):
+            seen["block"] = injection_block
+            return EpisodeResult(events=[], cost_steps=1, cost_tokens=1,
+                                 agent_version="x", model_version="x", session_path="x")
+
+    def fake_mat(ref, dest, **kw):
+        d = Path(dest); d.mkdir(parents=True, exist_ok=True)
+        return TaskBundle(task_id="t", variant_id=ref, family_id="rename",
+                          generator_template="hidden_coupling_v4", repo="billing",
+                          workspace=d, prompt="Do it.", test_command="pytest")
+    calls = {"n": 0}
+
+    def fake_sc(ws, timeout=120):
+        calls["n"] += 1
+        return calls["n"] != 1
+    orig = (R.success_check, R.materialize)
+    R.success_check, R.materialize = fake_sc, fake_mat
+    try:
+        s = MemoryStore()
+        _oracle_episode(s, "seed", "rename", "2020-01-01T00:00:00", oracle_passed=False)
+        R.run_episode(s, "GRx", arm="memory_off", model="m", memory_on=False,
+                      workspace_root=Path(tempfile.mkdtemp()), learn=False,
+                      adapter=_Spy(), feedback_level=2)
+    finally:
+        R.success_check, R.materialize = orig
+
+    eid = s.con.execute("SELECT episode_id FROM episodes WHERE arm='memory_off'"
+                        " ORDER BY started_at DESC LIMIT 1").fetchone()["episode_id"]
+    # 复原仅从 raw_events,且 = agent 实际所见(block 前缀)
+    rec = reconstruct_shown_feedback(s, eid)
+    assert rec is not None and rec["text"] == FEEDBACK_TEXT[2]
+    assert rec["text"] in seen["block"]   # store 复原 == agent 当时所见 → replay-faithful

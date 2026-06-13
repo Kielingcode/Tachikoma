@@ -263,3 +263,29 @@ def test_fr8b_replay_faithful_reconstruct_from_raw_events():
     rec = reconstruct_shown_feedback(s, eid)
     assert rec is not None and rec["text"] == FEEDBACK_TEXT[2]
     assert rec["text"] in seen["block"]   # store 复原 == agent 当时所见 → replay-faithful
+
+
+def test_stage6_correct_first_try_not_misclassified_as_stage1():
+    """P2.2 分类器回归:ran_check=True ∧ 无 flip ∧ oracle 绿 = ⑥(一次做对,
+    合法 not-born),不得误并进 ①(从没探索到 check)——后者是 kill-line 判
+    '上车点失灵→回炉'的信号,误标会导致无界改文案。复刻 GR5/GR6 误标。"""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "p2_2_c", Path(__file__).resolve().parent.parent / "scripts" / "p2_2_c.py")
+    c = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(c)
+    CHECK = "python3 tools/check_contract.py"
+    s = MemoryStore()
+    # ⑥ 轨迹:跑 check 一次就过(无 fail)+ oracle 绿,零 VP
+    ev = [
+        {"step_idx": 1, "event_type": "TEST_RUN", "payload": {"command": PYTEST, "passed": True}},
+        {"step_idx": 2, "event_type": "TEST_RUN",
+         "payload": {"command": CHECK, "passed": True, "source": "check_tool"}},
+        {"step_idx": 3, "event_type": "DELAYED_CHECK_RESULT",
+         "payload": {"passed": True, "source": "harness_hidden_oracle"}},
+    ]
+    s.ingest_episode(_meta("e6", "rename-field", started="t1"), ev)
+    stage, sig = c._classify(s, "e6")
+    assert sig["ran_check"] is True and sig["check_flip"] is False
+    assert stage == "6_correct_first_try", f"got {stage} (regression: ⑥ misfiled as ①)"

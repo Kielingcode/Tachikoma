@@ -71,6 +71,11 @@ def _classify(store, eid):
            "check_flip": check_flip, "oracle": oracle, "vp_minted": vp}
     if vp >= 1 and oracle:
         stage = "5_vp_born"
+    elif ran_check and not saw_check_fail and oracle:
+        # ⑥ 跑了 check、一次做对(无 fail→无 flip)、oracle 绿 = agent 能力/世界没逼出错;
+        # 合法 not-born。**必须先于 ① 判**,否则误并进"从没探索到 check"(上车点失灵),
+        # 污染 kill-line 的眼睛(①回炉上车点 vs ⑥agent能力 vs ③转P3 的区分)。
+        stage = "6_correct_first_try"
     elif oracle is False and ran_check:
         stage = "4_fixed_oracle_still_red"
     elif ran_check and saw_check_fail and not check_flip:

@@ -61,15 +61,24 @@ def first_try_success(ep: Episode) -> bool:
 
 def run_episode(store, variant_id: str, *, arm: str, model: str, memory_on: bool,
                 workspace_root: Path, learn: bool = True, k: int = 3,
-                adapter: CodeKittyAdapter | None = None) -> dict:
+                adapter: CodeKittyAdapter | None = None,
+                feedback_level: int | None = None) -> dict:
     adapter = adapter or CodeKittyAdapter()
     episode_id = f"{arm}-{variant_id}-{uuid.uuid4().hex[:6]}"
     ws = Path(workspace_root) / episode_id
     bundle = materialize(variant_id, ws)
 
+    # FR-8b(P2.1):上批同族 oracle-fail → 本批 prompt 前密封反馈(VP 上车点)。
+    # 环境事实,与 memory 注入正交;作 raw_event 落账(P16 自包含)。
+    fb = None
+    if feedback_level is not None:
+        fb = build_feedback(store, bundle.repo, bundle.family_id, _now(),
+                            level=feedback_level)
+    prompt = f"{fb['text']}\n\n{bundle.prompt}" if fb else bundle.prompt
+
     injected, suppressed, block = [], [], ""
     if memory_on:
-        injected, suppressed, retr_diag = retrieve(store, bundle.repo, ws, bundle.prompt, k=k)
+        injected, suppressed, retr_diag = retrieve(store, bundle.repo, ws, prompt, k=k)
         block = injection_block(injected)
 
     # Harness pristine check(机检初始状态,Environment verifies):TDD fixture 按构造

@@ -297,10 +297,20 @@ class MemoryStore:
                                 rec.adoption_step or 0, o.step, "adoption_outcome")
                             affected.add(mid)
 
+            # FR-9b case ⓪(P2.1,organic-正向-要求-oracle):episode 存在 oracle 检查
+            # 且其为 fail → 同 episode 抑制所有 organic 正向铸币(PD/VP 皆然)。
+            # 把"假成功轨迹零铸币"从靠提取器形状的隐式保护升为显式硬规则;
+            # 采纳记忆的负向(上方 G1/case③/⑤)已落账,不受此影响(P9 不对称)。
+            episode_oracle_failed = any(
+                a.kind == "oracle_check" and a.test_passed is False for a in ep.actions)
             for c in claims:
                 ckey = canonical_key(c.claim_type, c.trigger, c.action)
                 if ckey in g1_handled_keys:
                     continue   # 该 key 本 episode 已由 oracle 归因落账,防双计
+                if c.polarity > 0 and episode_oracle_failed:
+                    self._audit(cur, job_id, "case0_organic_positive_suppressed",
+                                episode_id, {"canonical_key": ckey})
+                    continue   # case ⓪:oracle-fail episode 不铸 organic 正向
                 src = "adoption_outcome" if ckey in adopted_keys else "organic_task"
                 mid = self._insert_claim_and_link(
                     cur, episode_id, c.trigger, c.action, c.polarity,

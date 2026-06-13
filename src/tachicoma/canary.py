@@ -38,9 +38,27 @@ def run_canary_pairs(store, variant_ids: list[str], model: str, workspace_root: 
     return out
 
 
+def batch_episode_ids(pairs: list[dict]) -> set:
+    """从 run_canary_pairs 结果取本批 episode-id 集——传给 evaluate(episode_ids=...)
+    以隔离继承快照 store 上的旧批 canary(P2.1 命名空间隔离)。"""
+    ids = set()
+    for p in pairs:
+        for side in ("with", "without"):
+            r = p.get(side)
+            if r:
+                ids.add(r["episode_id"])
+    return ids
+
+
 def evaluate(store, memory_id: str, *, step_delta_gate: float, theta_adopt: float,
-             nearmiss_max_neg_flips: int = 0) -> dict:
-    """纯函数:store(canary episodes)+ 阈值 → verdict。可重复调用,结果确定。"""
+             nearmiss_max_neg_flips: int = 0, episode_ids: set | None = None) -> dict:
+    """纯函数:store(canary episodes)+ 阈值 → verdict。可重复调用,结果确定。
+
+    评估范围显式(P2.1 修正):`episode_ids` 给定时**只聚合该集合内**的 canary
+    episodes——继承快照 store(如 P1→P2 wasteful 副本)携带旧批 canary,且
+    pair-id 命名空间跨批复用,隐式全店扫描 `canary%` 会把旧批污染进聚合
+    (P2 Stage D 实测 n_pairs=9 假判定)。省略时退回全店扫描(单批 store 安全)。
+    """
     item = store.con.execute(
         "SELECT * FROM memory_items WHERE memory_id=?", (memory_id,)).fetchone()
     trigger = json.loads(item["trigger_json"]).get("after_edit", "")
@@ -49,6 +67,8 @@ def evaluate(store, memory_id: str, *, step_delta_gate: float, theta_adopt: floa
     pairs: dict[tuple, dict] = {}
     for row in store.con.execute(
             "SELECT * FROM episodes WHERE arm LIKE 'canary%' ORDER BY started_at"):
+        if episode_ids is not None and row["episode_id"] not in episode_ids:
+            continue
         m = _ARM.match(row["arm"])
         if not m:
             continue
